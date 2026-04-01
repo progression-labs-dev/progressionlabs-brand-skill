@@ -67,89 +67,173 @@ Apply this brand system to ALL Progression Labs digital assets: presentations, d
 - **Wordmark:** "PROGRESSION LABS" uppercase, 10px, letter-spacing 0.15em, weight 500
 - **Logo + wordmark pairing:** Logo image at 80px wide, wordmark centered below with 8px gap
 
-## Title Slide / Cover Page (Partial Pixel Mosaic Hero)
+## Title Slide / Cover Page (Animated Hero Gradient)
 
-Every presentation, deck, or document with a cover page MUST use the pixel mosaic + smooth gradient hero as the title slide background. This is the brand's signature visual, ported from the deck tool (`PixelGradientCanvas.tsx`).
+Every presentation, deck, or document with a cover page MUST use the animated hero gradient as the title slide background. This is the brand's signature visual, ported from `HeroGradientGL.tsx` on the progressionlabs.com experiment site.
 
-### Key visual: Pixelation is PARTIAL, not full-bleed
-**The pixel mosaic occupies only the top-left quadrant of the hero.** The rest is a smooth (non-pixelated) gradient. This creates the signature "frosted glass dissolving into color" effect.
+### Architecture: 4-layer canvas stack
+1. **WebGL gradient** — animated smooth gradient with mouse-driven + shimmer pixel reveal
+2. **ASCII overlay** (Canvas 2D) — characters appear where pixel blocks are visible
+3. **Film grain** (Canvas 2D) — `mix-blend-mode: overlay`, 6% opacity
+4. **Content** — logo on top (z-index 3)
 
+### Gradient: animated 5-color cycling
+All 5 brand colors cycle through 9 dual-color states over 45 seconds:
+- Orchid → Blue+Salmon → Green → Orchid+Turquoise → Salmon → Blue+Turquoise → Blue → Orchid+Green → Turquoise → loop
+- Transitions use cubic smoothstep easing
+- 3-octave value noise creates organic color swirling between the two active colors
+- Luminance ramp (bottom→top): near-black `0.004` → deep `peak*0.06` → mid `peak*0.35` → peak → wash `mix(peak, white, 0.5)` → white
+
+### Pixel reveal: diagonal shimmer only (no mouse interaction for decks)
+Pixelated blocks (45px) appear via a sweeping diagonal shimmer band:
+- **Diagonal shimmer:** Band sweeps top-left → bottom-right at `fract(time * 0.25)`, Gaussian `exp(-dist^2 * 120) * 0.6`
+- Pixel blocks blend with shimmer mask: `mix(smoothColor, pixelColor, shimmerMask)`
+
+**NO mouse interaction in decks.** The website hero uses mouse-driven pixel reveal, but for decks remove the `uMouse`/`uMouseActive` uniforms entirely. Decks are presentation tools — mouse hover effects are distracting. Shimmer-only is cleaner.
+
+**Note:** The full HeroGradientGL.tsx source (in `websiteplab` repo, `deck-tool` branch) includes mouse uniforms — strip them when porting to deck HTML.
+
+### ASCII overlay (separate Canvas 2D layer)
+- Characters: `'0123456789@#$%&*+=?<>{}[]/\|LABS'`
+- Grid: 45px blocks matching the WebGL grid, 40% fill chance (random per init)
+- Each character positioned at block center, converted from WebGL UV to canvas coords: `py = height - (vUvY * height)`
+- Visibility: same `max(mouseMask, shimmerMask)` mask as the gradient — characters only appear where pixel blocks show
+- Alpha: `mask * cell.brightness` where brightness is random 0.5–1.0
+- Font: `500 14px "Inter", sans-serif`, white, centered
+
+### WebGL shader (copy-paste — ported from HeroGradientGL.tsx)
+
+**Vertex shader:**
+```glsl
+attribute vec2 position;
+varying vec2 vUv;
+void main() {
+  vUv = position * 0.5 + 0.5;
+  gl_Position = vec4(position, 0.0, 1.0);
+}
 ```
-┌─────────────────────────────┐
-│ ██ ██ ██ ██ ░░ ░░           │  ← Pixelated blocks (top-left)
-│ ██ ██ ██ ░░ ░░              │     with ASCII shimmer overlay
-│ ██ ██ ░░ ░░                 │
-│ ██ ░░ ░░     ╔═══════╗     │
-│ ░░ ░░        ║ LOGO  ║     │  ← Smooth gradient (center + bottom-right)
-│ ░░           ╚═══════╝     │     deep blue/purple, fading to near-black
-│              Title text     │
-│                             │
-│                    ▓▓▓▓▓▓▓▓▓│  ← Dark gradient at bottom
-└─────────────────────────────┘
+
+**Fragment shader:**
+```glsl
+precision highp float;
+uniform float uTime;
+uniform vec2 uResolution;
+varying vec2 vUv;
+
+float ssmooth(float t) { return t * t * (3.0 - 2.0 * t); }
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123); }
+
+float vnoise(vec2 p) {
+  vec2 i = floor(p); vec2 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float a = hash(i); float b = hash(i + vec2(1.0, 0.0));
+  float c = hash(i + vec2(0.0, 1.0)); float d = hash(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+vec3 computeGradient(vec2 uv, float time, vec3 peakA, vec3 peakB) {
+  float gp = uv.y;
+  float n1 = vnoise(uv * 1.8 + vec2(time * 0.10, time * 0.07));
+  float n2 = vnoise(uv * 3.5 + vec2(-time * 0.08, time * 0.12));
+  float n3 = vnoise(uv * 6.0 + vec2(time * 0.15, -time * 0.06));
+  float swirl = n1 * 0.5 + n2 * 0.3 + n3 * 0.2;
+  float verticalBias = smoothstep(0.05, 0.95, gp);
+  float colorMix = clamp(verticalBias + (swirl - 0.5) * 1.0, 0.0, 1.0);
+  vec3 peak = mix(peakA, peakB, colorMix);
+  float wave = (vnoise(uv * 2.0 + vec2(time * 0.06, -time * 0.04)) - 0.5) * 0.06;
+  float protection = smoothstep(0.0, 0.25, gp);
+  gp = clamp(gp + wave * protection, 0.0, 1.0);
+  vec3 deep = peak * 0.06; vec3 mid = peak * 0.35;
+  vec3 wash = mix(peak, vec3(1.0), 0.5);
+  float t1 = smoothstep(0.00, 0.10, gp); float t2 = smoothstep(0.06, 0.24, gp);
+  float t3 = smoothstep(0.15, 0.55, gp); float t4 = smoothstep(0.45, 0.85, gp);
+  float t5 = smoothstep(0.75, 1.00, gp);
+  vec3 color = mix(vec3(0.004), deep, t1);
+  color = mix(color, mid, t2); color = mix(color, peak, t3);
+  color = mix(color, wash, t4); color = mix(color, vec3(1.0), t5);
+  return color;
+}
+
+vec3 getGradientColor(vec2 uv) {
+  vec3 cO = vec3(0.729, 0.333, 0.827); // Orchid
+  vec3 cS = vec3(1.000, 0.627, 0.478); // Salmon
+  vec3 cG = vec3(0.725, 0.914, 0.475); // Green
+  vec3 cT = vec3(0.251, 0.878, 0.816); // Turquoise
+  vec3 cB = vec3(0.000, 0.000, 1.000); // Blue
+  float progress = mod(uTime, 45.0) / 45.0;
+  float seg = progress * 9.0;
+  int idx = int(floor(seg));
+  float t = ssmooth(seg - floor(seg));
+  vec3 fA, fB, tA, tB;
+  if (idx == 0)      { fA = cO; fB = cO; tA = cB; tB = cS; }
+  else if (idx == 1) { fA = cB; fB = cS; tA = cG; tB = cG; }
+  else if (idx == 2) { fA = cG; fB = cG; tA = cO; tB = cT; }
+  else if (idx == 3) { fA = cO; fB = cT; tA = cS; tB = cS; }
+  else if (idx == 4) { fA = cS; fB = cS; tA = cB; tB = cT; }
+  else if (idx == 5) { fA = cB; fB = cT; tA = cB; tB = cB; }
+  else if (idx == 6) { fA = cB; fB = cB; tA = cO; tB = cG; }
+  else if (idx == 7) { fA = cO; fB = cG; tA = cT; tB = cT; }
+  else               { fA = cT; fB = cT; tA = cO; tB = cO; }
+  vec3 peakA = mix(fA, tA, t); vec3 peakB = mix(fB, tB, t);
+  return computeGradient(uv, uTime, peakA, peakB);
+}
+
+void main() {
+  vec3 smoothColor = getGradientColor(vUv);
+  float blockPx = 45.0;
+  vec2 grid = uResolution / blockPx;
+  vec2 cellId = floor(vUv * grid);
+  vec2 pixelUv = cellId / grid;
+  float colOffset = hash(vec2(cellId.x, 0.0)) * 0.035;
+  pixelUv.y += colOffset;
+  vec3 pixelColor = getGradientColor(pixelUv);
+
+  // Diagonal shimmer — sweeping band (no mouse interaction in decks)
+  float diag = (vUv.x + 1.0 - vUv.y) * 0.5;
+  float shimmerPos = fract(uTime * 0.25);
+  float shimmerDist = abs(diag - shimmerPos);
+  shimmerDist = min(shimmerDist, 1.0 - shimmerDist);
+  float shimmerMask = exp(-shimmerDist * shimmerDist * 120.0) * 0.6;
+
+  vec3 finalColor = mix(smoothColor, pixelColor, shimmerMask);
+  gl_FragColor = vec4(finalColor, 1.0);
+}
 ```
 
-### Two layers composited together
-1. **Smooth gradient layer (full canvas):** The base gradient covers the entire canvas — Orchid/Salmon blending to deep Blue/Purple, darkening to near-black at bottom-right
-2. **Pixelated overlay (top-left only):** The same gradient colors but snapped to a block grid, with a wavy alpha mask that fades the blocks out toward center/bottom-right
-
-### Gradient colors
-- **Color A (warm):** Orchid `[186, 85, 211]` / Salmon `[255, 160, 122]` — dominates top-left
-- **Color B (cool):** Blue `[0, 0, 255]` — dominates bottom-right
-- **Value noise:** 3 octaves of 2D noise create organic swirling between colors
-- **Luminance ramp:** near-black → deep (peak×0.06) → mid (peak×0.35) → peak → wash (mix toward white at 20%)
-- **Bottom darkening:** Gradient goes to near-black at bottom edge
-
-### Pixelation mask (wavy fade from top-left)
-The pixelated blocks fade out from the top-left corner using the same wavy smoothstep as the pixel corners:
-
+### JS setup (raw WebGL, no Three.js dependency)
 ```javascript
-// Block size for hero: 45px (larger than interior corner blocks)
-const blockSize = 45;
-
-// For each pixel, compute distance from top-left origin
-const nx = x / canvasWidth;   // 0 at left, 1 at right
-const ny = y / canvasHeight;  // 0 at top, 1 at bottom
-const dist = Math.sqrt(nx*nx + ny*ny); // 0 at top-left, ~1.41 at bottom-right
-
-// Wavy fade — pixelation dissolves organically
-const wave = Math.sin(nx*3.5+1.2)*0.18 + Math.sin(nx*8+3.7)*0.1
-           + Math.cos(ny*5.5+0.5)*0.12 + Math.sin(nx*12)*0.05;
-const pixelMask = smoothstep(0.8, 0.0, dist + wave * 0.15);
-
-// Where pixelMask > 0: show block-snapped color
-// Where pixelMask = 0: show smooth gradient
-// Blend between them: mix(smoothColor, pixelColor, pixelMask)
+// Uniforms: uTime (animated elapsed), uResolution, uMouse (damped 0-1 UV), uMouseActive (0-1 lerp)
+// Fullscreen quad: [-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]
+// Mouse tracking: damped lerp at 0.08 per frame, mouseActive lerp at 0.1
+// Render loop: requestAnimationFrame, update uTime = elapsed seconds
+// Resize: canvas.width = offsetWidth * min(devicePixelRatio, 2)
 ```
 
-### ASCII shimmer band (on pixelated area only)
-ASCII characters from `'0123456789@#$%&*+=?<>{}[]/\|LABS'` appear within the pixelated region:
-- Band position: diagonal from top-left, `diag = (uv.x + 1.0 - uv.y) * 0.5`, frozen at ~0.45
-- Gaussian mask: `exp(-dist^2 * 80)`
-- **Only rendered where pixelMask > 0** — shimmer fades with the blocks
-- Density: 40%, opacity: 50% × brightness × shimmerMask × pixelMask
-- White text, Inter 500 weight
-- Film grain: 6% opacity, baked into alpha (no overlay boundary)
-
-### Implementation
-Use `<canvas>` (not SVG). Set `canvas.width = window.innerWidth; canvas.height = window.innerHeight`. CSS: `position: absolute; top:0; left:0; width:100%; height:100%`.
-
-**IMPORTANT:** The parent slide must have `position: absolute` (not `relative`) with `inset: 0` — otherwise the slide collapses to content height.
+### HTML structure
+```html
+<div class="hero-layers">
+  <canvas id="heroGL"></canvas>      <!-- WebGL gradient -->
+  <canvas id="heroAscii"></canvas>   <!-- ASCII overlay (pointer-events: none) -->
+  <canvas id="heroGrain"></canvas>   <!-- Film grain (mix-blend-mode: overlay, opacity: 0.06) -->
+</div>
+```
 
 ### Title slide layout
-- Partial pixel mosaic canvas (z-index 1) — pixelation top-left, smooth gradient elsewhere
+- Hero gradient canvas stack (z-index 1)
 - **Logo only** — white `logo-white.png` centered, 100px wide, `drop-shadow(0 0 20px rgba(255,255,255,0.2))` (z-index 3)
 - **No title text, no subtitle, no wordmark** on the title slide — just the logo mark on the gradient
 - Footer: monospace meta in `rgba(255,255,255,0.25)` (optional)
+- Parent slide: `position: absolute; inset: 0` — NOT relative
 
 ## Pixel Corner Accent (Interior Pages)
 
 For non-title slides/pages, use pixel corner accents as brand decorations. This is the **exact algorithm from the deck tool** (`DeckCanvas.tsx` corner-accent mode on the `deck-tool` branch of `websiteplab`).
 
-### Parameters (updated — richer concentration with gradual staircase falloff)
+### Parameters
 | Param | Default | Description |
 |-------|---------|-------------|
 | `blockSize` | `25` | Pixel block size in px |
-| `fadeRadius` | `0.15` | 0–1, fraction of diagonal — keep SMALL for compact corner accent (NOT spread across slide) |
+| `fadeRadius` | `0.15` | 0–1, fraction of diagonal — controls how far blocks spread from corner |
 | `fadeScatter` | `0` | 0–1, set to 0 for clean edge — scatter creates messy stray blocks |
 | `accentColorA` | `[80, 120, 230]` | Brand blue (RGB 0-255) |
 | `accentColorB` | `[80, 120, 230]` | **Same as A — single color, NOT two-tone** |
@@ -161,10 +245,10 @@ For non-title slides/pages, use pixel corner accents as brand decorations. This 
 **CRITICAL: Use ONE color.** Both `accentColorA` and `accentColorB` must be the same blue. Two different colors (e.g. blue + purple) creates a messy multi-tone look. The variation comes from alpha/opacity, not hue.
 
 ### Logo watermark in corner accent
-Draw the white PL logo (`pl-logo-white.png`) in the densest area of each corner accent:
-- Size: 28px wide, maintain aspect ratio (110/138)
-- Position: 1.5 block widths inward from the corner origin
-- Opacity: 1.0 (full white, no glow or drop-shadow — just clean and present)
+Draw the white PL logo (`logo-white.png`) in the densest area of each corner accent:
+- Size: 36px wide, maintain aspect ratio (110/138)
+- Position: 1.5 block widths inward from the corner origin, centered on the point
+- Opacity: 1.0 (full white, no transparency, no drop-shadow — clean and present)
 - Drawn AFTER all blocks so it sits on top
 
 ### Implementation (exact code from DeckCanvas.tsx)
@@ -181,7 +265,7 @@ function drawCornerAccent(canvasId, cornerOrigin, opts) {
   canvas.style.width = width + 'px'; canvas.style.height = height + 'px';
   const ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr);
   const blockSize = opts.blockSize || 25;
-  const fadeRadius = opts.fadeRadius || 0.09;
+  const fadeRadius = opts.fadeRadius || 0.15;
   const maxAlpha = opts.maxAlpha || 0.88;
   const [aR, aG, aB] = opts.colorA || [80, 120, 230];
   const [bR, bG, bB] = opts.colorB || [80, 120, 230];
@@ -249,7 +333,7 @@ function drawCornerAccent(canvasId, cornerOrigin, opts) {
     }
   }
 
-  // Logo watermark in densest area
+  // Logo watermark in densest area — full opacity, no effects
   const logoImg = new Image();
   logoImg.onload = function() {
     const logoSize = 36;
@@ -261,13 +345,9 @@ function drawCornerAccent(canvasId, cornerOrigin, opts) {
       case 'top-left':     lx = pad + logoSize/2; ly = pad + logoSize/2; break;
       case 'bottom-right': lx = width - pad - logoSize/2; ly = height - pad - logoSize/2; break;
     }
-    ctx.globalAlpha = 0.7;
-    ctx.filter = 'drop-shadow(0 0 6px rgba(255,255,255,0.3))';
     ctx.drawImage(logoImg, lx - logoSize/2, ly - logoSize/2, logoSize, logoSize * (110/138));
-    ctx.globalAlpha = 1.0;
-    ctx.filter = 'none';
   };
-  logoImg.src = 'pl-logo-white.png';
+  logoImg.src = 'logo-white.png';
 }
 ```
 
