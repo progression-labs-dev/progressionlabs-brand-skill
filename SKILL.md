@@ -225,130 +225,157 @@ void main() {
 - Footer: monospace meta in `rgba(255,255,255,0.25)` (optional)
 - Parent slide: `position: absolute; inset: 0` — NOT relative
 
-## Pixel Corner Accent (Interior Pages)
+## Animated Pixel Corner Accent (Interior Pages)
 
-For non-title slides/pages, use pixel corner accents as brand decorations. This is the **exact algorithm from the deck tool** (`DeckCanvas.tsx` corner-accent mode on the `deck-tool` branch of `websiteplab`).
+For non-title slides/pages, use **animated** pixel corner accents. These use Canvas 2D with `requestAnimationFrame` — same clean uniform block look as the original static version, but with animated color cycling through the 5 brand colors and a subtle diagonal shimmer.
+
+### Key design rules
+- **ONE color at a time** — all blocks are the same color at any given moment, cycling through brand colors over 45 seconds. NEVER mix two colors simultaneously (e.g. red + blue blocks = cheap)
+- **Uniform opacity** — blocks get their alpha from distance falloff only. No per-block brightness variation beyond the staircase smoothstep
+- **Subtle shimmer** — diagonal band passes through, gently brightening existing blocks by 15% max. It is MULTIPLICATIVE (`blockAlpha * (1 + shimmer)`) — it must NOT reveal blocks that should be invisible
+- **20px blocks** — finer grain than the hero's 45px
+- **Alternating corners** — `top-right` on odd slides, `bottom-left` on even
 
 ### Parameters
 | Param | Default | Description |
 |-------|---------|-------------|
-| `blockSize` | `25` | Pixel block size in px |
-| `fadeRadius` | `0.15` | 0–1, fraction of diagonal — controls how far blocks spread from corner |
-| `fadeScatter` | `0` | 0–1, set to 0 for clean edge — scatter creates messy stray blocks |
-| `accentColorA` | `[80, 120, 230]` | Brand blue (RGB 0-255) |
-| `accentColorB` | `[80, 120, 230]` | **Same as A — single color, NOT two-tone** |
-| `maxAlpha` | `0.88` | Rich, concentrated blocks near corner origin — NOT pale/translucent |
-| `asciiDensity` | `0.4` | Fraction of blocks that get an ASCII character overlay |
-| `asciiAlpha` | `blockAlpha * 0.6` | Character opacity tracks block opacity |
+| `blockSize` | `20` | Pixel block size in px |
+| `fadeRadius` | `0.15` | 0–1, fraction of diagonal |
+| `maxAlpha` | `0.88` | Peak alpha near corner origin |
+| `asciiDensity` | `0.4` | Fraction of blocks with ASCII character |
+| `asciiAlpha` | `blockAlpha * 0.6` | Character opacity |
+| `shimmerSpeed` | `0.12` | Diagonal sweep speed (half the hero's 0.25) |
+| `shimmerBoost` | `0.15` | Max multiplicative brightness lift |
 | `cornerOrigin` | alternating | `top-right` on odd slides, `bottom-left` on even |
 
-**CRITICAL: Use ONE color.** Both `accentColorA` and `accentColorB` must be the same blue. Two different colors (e.g. blue + purple) creates a messy multi-tone look. The variation comes from alpha/opacity, not hue.
+### Logo watermark
+- `logo-white.png`, 26px wide, aspect ratio 110/138
+- Position: 2 block widths inward from corner origin
+- Full opacity, no effects, drawn AFTER all blocks each frame
 
-### Logo watermark in corner accent
-Draw the white PL logo (`logo-white.png`) in the densest area of each corner accent:
-- Size: 26px wide, maintain aspect ratio (110/138)
-- Position: 1.5 block widths inward from the corner origin, centered on the point
-- Opacity: 1.0 (full white, no transparency, no drop-shadow — clean and present)
-- Drawn AFTER all blocks so it sits on top
+### Color cycling (same 9-state 45s cycle as hero)
+All 5 brand colors rotate: Orchid → Blue+Salmon → Green → Orchid+Turquoise → Salmon → Blue+Turquoise → Blue → Orchid+Green → Turquoise → loop. The two slot colors are averaged into ONE unified color per frame.
 
-### Implementation (exact code from DeckCanvas.tsx)
-Use `<canvas>`, NOT SVG. The algorithm uses `smoothstep(1 - t)` fade with scatter for organic edges.
+### Implementation (Canvas 2D, animated — copy-paste)
+
+Initialize one per content slide at page load. Each runs its own `requestAnimationFrame` loop.
 
 ```javascript
-// Updated corner-accent with richer concentration, staircase falloff, and logo watermark
-function drawCornerAccent(canvasId, cornerOrigin, opts) {
+function initAnimatedCorner(canvasId, cornerOrigin) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
-  const dpr = window.devicePixelRatio || 1;
-  const width = window.innerWidth, height = window.innerHeight;
-  canvas.width = width * dpr; canvas.height = height * dpr;
-  canvas.style.width = width + 'px'; canvas.style.height = height + 'px';
-  const ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr);
-  const blockSize = opts.blockSize || 25;
-  const fadeRadius = opts.fadeRadius || 0.15;
-  const maxAlpha = opts.maxAlpha || 0.88;
-  const [aR, aG, aB] = opts.colorA || [80, 120, 230];
-  const [bR, bG, bB] = opts.colorB || [80, 120, 230];
+  const ctx = canvas.getContext('2d');
+  const BLOCK_SIZE = 20;
+  const CHARS = '0123456789@#$%&*+=?<>{}[]/\\|LABS';
+  const logoImg = new Image(); logoImg.src = 'logo-white.png';
+  const startTime = performance.now() / 1000;
 
-  let ox, oy;
+  let oxScreen, oyScreen;
   switch (cornerOrigin) {
-    case 'top-left':     ox = 0;     oy = 0;      break;
-    case 'top-right':    ox = width; oy = 0;      break;
-    case 'bottom-left':  ox = 0;     oy = height; break;
-    case 'bottom-right': ox = width; oy = height; break;
+    case 'top-right': oxScreen = 1.0; oyScreen = 0.0; break;
+    case 'bottom-left': oxScreen = 0.0; oyScreen = 1.0; break;
+    case 'top-left': oxScreen = 0.0; oyScreen = 0.0; break;
+    case 'bottom-right': oxScreen = 1.0; oyScreen = 1.0; break;
   }
 
-  const diagonal = Math.sqrt(width * width + height * height);
-  const maxDist = diagonal * fadeRadius;
-  const cols = Math.ceil(width / blockSize);
-  const rows = Math.ceil(height / blockSize);
+  const seed = (x, y) => { const h = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123; return h - Math.floor(h); };
+  const smoothstep = (e0, e1, x) => { const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
 
-  const smoothstep = (t) => {
-    const c = Math.max(0, Math.min(1, t));
-    return c * c * (3 - 2 * c);
-  };
-  const seed = (x, y) => {
-    const h = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
-    return h - Math.floor(h);
-  };
+  const brandColors = [
+    [186, 85, 211], [255, 160, 122], [185, 233, 121], [64, 224, 208], [0, 0, 255],
+  ];
+  const cycle = [[0,0,4,1],[4,1,2,2],[2,2,0,3],[0,3,1,1],[1,1,4,3],[4,3,4,4],[4,4,0,2],[0,2,3,3],[3,3,0,0]];
 
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < cols; col++) {
-      const cx = (col + 0.5) * blockSize;
-      const cy = (row + 0.5) * blockSize;
-      const dist = Math.sqrt((cx - ox) ** 2 + (cy - oy) ** 2);
-      const t = dist / maxDist;
-      if (t >= 1.2) continue;
-
-      // Gradual staircase: steeper near origin, long tail outward
-      let blockAlpha;
-      if (t <= 1.0) {
-        blockAlpha = smoothstep(1 - t) * maxAlpha;
-      } else {
-        // Extended tail — sparse blocks beyond main radius
-        blockAlpha = (1.2 - t) * 0.15 * maxAlpha;
-      }
-      // Per-block variation for organic feel
-      blockAlpha *= (0.85 + seed(col + 700, row + 700) * 0.15);
-      if (blockAlpha < 0.02) continue;
-
-      const colorMix = seed(col + 300, row + 300);
-      const r = Math.round(aR + (bR - aR) * colorMix);
-      const g = Math.round(aG + (bG - aG) * colorMix);
-      const b = Math.round(aB + (bB - aB) * colorMix);
-
-      ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${blockAlpha})`;
-      ctx.fillRect(col * blockSize, row * blockSize, blockSize, blockSize);
-
-      // ASCII shimmer overlay — characters on 40% of blocks
-      if (blockAlpha > 0.06 && seed(col, row) < 0.4) {
-        const CHARS = '0123456789@#$%&*+=?<>{}[]/\\|LABS';
-        const ch = CHARS[Math.floor(seed(col + 100, row + 100) * CHARS.length)];
-        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${blockAlpha * 0.6})`;
-        ctx.font = '500 ' + (blockSize * 0.5) + 'px "Inter", sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(ch, cx, cy);
-      }
-    }
+  // Returns ONE unified color (both cycle slots averaged)
+  function getCycleColor(time) {
+    const progress = ((time % 45) / 45);
+    const seg = progress * 9;
+    const idx = Math.floor(seg);
+    const t = smoothstep(0, 1, seg - idx);
+    const s = cycle[Math.min(idx, 8)];
+    const fA = brandColors[s[0]], fB = brandColors[s[1]], tA = brandColors[s[2]], tB = brandColors[s[3]];
+    const pA = fA.map((v, i) => v + (tA[i] - v) * t);
+    const pB = fB.map((v, i) => v + (tB[i] - v) * t);
+    return pA.map((v, i) => Math.round((v + pB[i]) / 2));
   }
 
-  // Logo watermark in densest area — full opacity, no effects
-  const logoImg = new Image();
-  logoImg.onload = function() {
-    const logoSize = 26;
-    const pad = blockSize * 1.5;
-    let lx, ly;
-    switch (cornerOrigin) {
-      case 'top-right':    lx = width - pad - logoSize/2; ly = pad + logoSize/2; break;
-      case 'bottom-left':  lx = pad + logoSize/2; ly = height - pad - logoSize/2; break;
-      case 'top-left':     lx = pad + logoSize/2; ly = pad + logoSize/2; break;
-      case 'bottom-right': lx = width - pad - logoSize/2; ly = height - pad - logoSize/2; break;
+  let width = 0, height = 0;
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    width = canvas.parentElement.clientWidth; height = canvas.parentElement.clientHeight;
+    canvas.width = width * dpr; canvas.height = height * dpr;
+    canvas.style.width = width + 'px'; canvas.style.height = height + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  function render() {
+    const time = performance.now() / 1000 - startTime;
+    const [r, g, b] = getCycleColor(time);
+    ctx.clearRect(0, 0, width, height);
+
+    const cols = Math.ceil(width / BLOCK_SIZE), rows = Math.ceil(height / BLOCK_SIZE);
+    const fadeRadius = 0.15, maxAlpha = 0.88;
+    const oxPx = oxScreen * width, oyPx = oyScreen * height;
+    const diagonal = Math.sqrt(width * width + height * height);
+    const maxDist = diagonal * fadeRadius;
+    const shimmerPos = (time * 0.12) % 1.0;
+
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const cx = (col + 0.5) * BLOCK_SIZE, cy = (row + 0.5) * BLOCK_SIZE;
+        const dist = Math.sqrt((cx - oxPx) ** 2 + (cy - oyPx) ** 2);
+        const t = dist / maxDist;
+        if (t >= 1.2) continue;
+
+        let blockAlpha;
+        if (t <= 1.0) { blockAlpha = smoothstep(1, 0, t) * maxAlpha; }
+        else { blockAlpha = (1.2 - t) * 0.15 * maxAlpha; }
+        blockAlpha *= (0.85 + seed(col + 700, row + 700) * 0.15);
+        if (blockAlpha < 0.02) continue;
+
+        // Shimmer — multiplicative only, never reveals invisible blocks
+        const nx = cx / width, ny = cy / height;
+        const diag = (nx + 1.0 - ny) * 0.5;
+        let shimmerDist = Math.abs(diag - shimmerPos);
+        shimmerDist = Math.min(shimmerDist, 1.0 - shimmerDist);
+        const shimmerMask = Math.exp(-shimmerDist * shimmerDist * 200) * 0.15;
+        const finalAlpha = blockAlpha * (1.0 + shimmerMask);
+
+        ctx.fillStyle = `rgba(${r},${g},${b},${finalAlpha})`;
+        ctx.fillRect(col * BLOCK_SIZE, row * BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+
+        if (blockAlpha > 0.06 && seed(col, row) < 0.4) {
+          const ch = CHARS[Math.floor(seed(col + 100, row + 100) * CHARS.length)];
+          ctx.fillStyle = `rgba(${r},${g},${b},${blockAlpha * 0.6})`;
+          ctx.font = '500 ' + (BLOCK_SIZE * 0.45) + 'px "Inter", sans-serif';
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(ch, cx, cy);
+        }
+      }
     }
-    ctx.drawImage(logoImg, lx - logoSize/2, ly - logoSize/2, logoSize, logoSize * (110/138));
-  };
-  logoImg.src = 'logo-white.png';
+
+    if (logoImg.complete && logoImg.naturalWidth > 0) {
+      const logoSize = 26, pad = BLOCK_SIZE * 2;
+      let lx, ly;
+      switch (cornerOrigin) {
+        case 'top-right': lx = width - pad; ly = pad; break;
+        case 'bottom-left': lx = pad; ly = height - pad; break;
+        case 'top-left': lx = pad; ly = pad; break;
+        case 'bottom-right': lx = width - pad; ly = height - pad; break;
+      }
+      ctx.drawImage(logoImg, lx - logoSize/2, ly - logoSize/2, logoSize, logoSize * (110/138));
+    }
+    requestAnimationFrame(render);
+  }
+  requestAnimationFrame(render);
 }
+
+// Initialize at page load:
+// for (let i = 1; i < totalSlides; i++) {
+//   initAnimatedCorner('corner-' + i, i % 2 === 1 ? 'top-right' : 'bottom-left');
+// }
 ```
 
 ### Positioning (CRITICAL)
