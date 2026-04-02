@@ -220,7 +220,7 @@ void main() {
 
 ### Title slide layout
 - Hero gradient canvas stack (z-index 1)
-- **Logo only** — white `logo-white.png` centered, 100px wide, `drop-shadow(0 0 20px rgba(255,255,255,0.2))` (z-index 3)
+- **Logo only** — white `logo-white.png` centered, 64px wide, `drop-shadow(0 0 20px rgba(255,255,255,0.2))` (z-index 3)
 - **No title text, no subtitle, no wordmark** on the title slide — just the logo mark on the gradient
 - Footer: monospace meta in `rgba(255,255,255,0.25)` (optional)
 - Parent slide: `position: absolute; inset: 0` — NOT relative
@@ -246,7 +246,7 @@ For non-title slides/pages, use pixel corner accents as brand decorations. This 
 
 ### Logo watermark in corner accent
 Draw the white PL logo (`logo-white.png`) in the densest area of each corner accent:
-- Size: 36px wide, maintain aspect ratio (110/138)
+- Size: 26px wide, maintain aspect ratio (110/138)
 - Position: 1.5 block widths inward from the corner origin, centered on the point
 - Opacity: 1.0 (full white, no transparency, no drop-shadow — clean and present)
 - Drawn AFTER all blocks so it sits on top
@@ -336,7 +336,7 @@ function drawCornerAccent(canvasId, cornerOrigin, opts) {
   // Logo watermark in densest area — full opacity, no effects
   const logoImg = new Image();
   logoImg.onload = function() {
-    const logoSize = 36;
+    const logoSize = 26;
     const pad = blockSize * 1.5;
     let lx, ly;
     switch (cornerOrigin) {
